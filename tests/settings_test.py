@@ -84,9 +84,12 @@ class Logic(unittest.TestCase):
 
     def test_is_hidden_falls_back_across_broken_bindings(self):
         # The bug this guards: get_is_hidden(), get_boolean("Hidden") and
-        # get_filename() have each raised TypeError with a different arity
-        # on this project's own CI (a PyGObject/GioUnix.DesktopAppInfo
-        # binding quirk), one only surfacing after the last was fixed.
+        # even app.get_filename() have each raised TypeError with a
+        # different arity on this project's own CI (a PyGObject/
+        # GioUnix.DesktopAppInfo binding quirk), one only surfacing after
+        # the last was fixed -- _is_hidden()'s fallback no longer goes
+        # through the app object at all, it finds the file itself via
+        # _find_desktop_file(desktop_id).
         class AllBroken:
             def get_is_hidden(self):
                 raise TypeError("simulated binding incompatibility")
@@ -94,17 +97,15 @@ class Logic(unittest.TestCase):
             def get_boolean(self, key):
                 raise TypeError("simulated binding incompatibility")
 
-            def get_filename(self):
-                raise TypeError("simulated binding incompatibility")
-
-        # missing input: every method broken -- fail open, not an exception
-        self.assertFalse(s._is_hidden(AllBroken()))
+        # missing input: every method broken, and no matching file either
+        # -- fail open, not an exception
+        self.assertFalse(s._is_hidden(AllBroken(), "does-not-exist.desktop"))
 
         class OnlyIsHiddenWorks:
             def get_is_hidden(self):
                 return True
 
-        self.assertTrue(s._is_hidden(OnlyIsHiddenWorks()))
+        self.assertTrue(s._is_hidden(OnlyIsHiddenWorks(), "unused.desktop"))
 
         class OnlyGetBooleanWorks:
             def get_is_hidden(self):
@@ -113,76 +114,58 @@ class Logic(unittest.TestCase):
             def get_boolean(self, key):
                 return key == "Hidden"
 
-        self.assertTrue(s._is_hidden(OnlyGetBooleanWorks()))
+        self.assertTrue(s._is_hidden(OnlyGetBooleanWorks(), "unused.desktop"))
 
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "test.desktop"
-
-            class OnlyFileReadWorks:
-                def get_is_hidden(self):
-                    raise TypeError()
-
-                def get_boolean(self, key):
-                    raise TypeError()
-
-                def get_filename(self):
-                    return str(path)
-
-            path.write_text("[Desktop Entry]\nHidden=true\n")
-            self.assertTrue(s._is_hidden(OnlyFileReadWorks()))
-            path.write_text("[Desktop Entry]\nHidden=false\n")
-            self.assertFalse(s._is_hidden(OnlyFileReadWorks()))
-            path.write_text("[Desktop Entry]\n")  # boundary: key absent entirely
-            self.assertFalse(s._is_hidden(OnlyFileReadWorks()))
-
-            class FileReadAlsoBroken(OnlyFileReadWorks):
-                def get_filename(self):
-                    raise TypeError()
-
-            self.assertFalse(s._is_hidden(FileReadAlsoBroken()))
+            apps = Path(tmp) / "applications"
+            apps.mkdir()
+            path = apps / "test.desktop"
+            with patch.dict(os.environ, {"XDG_DATA_HOME": tmp}):
+                path.write_text("[Desktop Entry]\nHidden=true\n")
+                self.assertTrue(s._is_hidden(AllBroken(), "test.desktop"))
+                path.write_text("[Desktop Entry]\nHidden=false\n")
+                self.assertFalse(s._is_hidden(AllBroken(), "test.desktop"))
+                path.write_text("[Desktop Entry]\n")  # boundary: key absent entirely
+                self.assertFalse(s._is_hidden(AllBroken(), "test.desktop"))
+                # no file at all under this id -- fail open, not an exception
+                self.assertFalse(s._is_hidden(AllBroken(), "still-missing.desktop"))
 
     def test_desktop_name_falls_back_across_broken_bindings(self):
         # Same binding-reliability problem as _is_hidden(), for a different
         # key: get_string("Name") also raised TypeError on this project's
         # own CI, only after get_is_hidden()/get_boolean("Hidden") had
-        # already been worked around.
+        # already been worked around -- and, like _is_hidden(), the
+        # fallback here finds the file itself rather than trusting
+        # app.get_filename().
         class GetStringWorks:
             def get_string(self, key):
                 return "Right Name" if key == "Name" else ""
 
-        self.assertEqual(s._desktop_name(GetStringWorks()), "Right Name")
+        self.assertEqual(s._desktop_name(GetStringWorks(), "unused.desktop"), "Right Name")
+
+        class GetStringBroken:
+            def get_string(self, key):
+                raise TypeError("simulated binding incompatibility")
+
+        # missing input: broken method and no matching file -- empty, not an exception
+        self.assertEqual(s._desktop_name(GetStringBroken(), "does-not-exist.desktop"), "")
 
         class GetStringReturnsEmpty:
             def get_string(self, key):
                 return ""
 
-            def get_filename(self):
-                raise TypeError()
-
-        # missing input: no Name key anywhere -- empty, not an exception
-        self.assertEqual(s._desktop_name(GetStringReturnsEmpty()), "")
-
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "test.desktop"
-
-            class GetStringBroken:
-                def get_string(self, key):
-                    raise TypeError("simulated binding incompatibility")
-
-                def get_filename(self):
-                    return str(path)
-
-            path.write_text("[Desktop Entry]\nName=Fallback Name\n")
-            self.assertEqual(s._desktop_name(GetStringBroken()), "Fallback Name")
-            # boundary: the localized key must not be matched as the base one
-            path.write_text("[Desktop Entry]\nName[de]=Deutscher Name\n")
-            self.assertEqual(s._desktop_name(GetStringBroken()), "")
-
-            class AlsoFileReadBroken(GetStringBroken):
-                def get_filename(self):
-                    raise TypeError()
-
-            self.assertEqual(s._desktop_name(AlsoFileReadBroken()), "")
+            apps = Path(tmp) / "applications"
+            apps.mkdir()
+            path = apps / "test.desktop"
+            with patch.dict(os.environ, {"XDG_DATA_HOME": tmp}):
+                path.write_text("[Desktop Entry]\nName=Fallback Name\n")
+                self.assertEqual(s._desktop_name(GetStringBroken(), "test.desktop"), "Fallback Name")
+                # a get_string() that just returns empty (no exception) also falls back
+                self.assertEqual(s._desktop_name(GetStringReturnsEmpty(), "test.desktop"), "Fallback Name")
+                # boundary: the localized key must not be matched as the base one
+                path.write_text("[Desktop Entry]\nName[de]=Deutscher Name\n")
+                self.assertEqual(s._desktop_name(GetStringBroken(), "test.desktop"), "")
 
     def test_parse_coordinates(self):
         for query, expected in (
@@ -570,14 +553,14 @@ class GtkBehaviour(unittest.TestCase):
         apps.mkdir(parents=True, exist_ok=True)
         path = apps / "hyde-test.desktop"
         entry = s.Entry("Test", "Test", "Test", "", (path.name,))
-        self.assertIsNone(s.desktop_info(entry))
+        self.assertIsNone(s.desktop_info(entry)[0])
         def resolved(available):
             # GIO invalidates its desktop directory cache asynchronously.
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 while s.GLib.MainContext.default().iteration(False):
                     pass
-                app = s.desktop_info(entry)
+                app, _ = s.desktop_info(entry)
                 if bool(app) == available:
                     return app
                 time.sleep(0.01)
@@ -601,9 +584,9 @@ class GtkBehaviour(unittest.TestCase):
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=TRUE\n')
         self.assertEqual(resolved(True).get_display_name(), "Test Tool")
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nTryExec=/does/not/exist\n')
-        self.assertIsNone(s.desktop_info(entry))
+        self.assertIsNone(s.desktop_info(entry)[0])
         path.write_text('not a desktop entry')
-        self.assertIsNone(s.desktop_info(entry))
+        self.assertIsNone(s.desktop_info(entry)[0])
 
     def test_entry_detail_ignores_session_locale(self):
         # get_display_name() honours the session locale (e.g. LANG=de_DE
@@ -619,7 +602,7 @@ class GtkBehaviour(unittest.TestCase):
         while time.monotonic() < deadline:
             while s.GLib.MainContext.default().iteration(False):
                 pass
-            app = s.desktop_info(entry)
+            app, _ = s.desktop_info(entry)
             if app:
                 break
             time.sleep(0.01)
@@ -636,7 +619,7 @@ class GtkBehaviour(unittest.TestCase):
     def test_launch_failures(self):
         app = s.create_application()
         button, message = s.Gtk.Button(), s.Gtk.Label()
-        with patch.object(s, "desktop_info", return_value=None):
+        with patch.object(s, "desktop_info", return_value=(None, None)):
             app.launch(button, s.ENTRIES[0], message)
         self.assertIn("no longer available", message.get_text())
         self.assertTrue(message.get_visible())

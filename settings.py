@@ -585,29 +585,34 @@ def palette_provider(path):
     return provider
 
 
-def _desktop_file_text(app):
-    """The underlying .desktop file's raw text, or "" if it can't be read --
-    the fallback several GDesktopAppInfo convenience methods below fall back
-    to when the method itself turns out to be unusable (see _is_hidden and
-    _desktop_name)."""
-    try:
-        path = app.get_filename()
-    except TypeError:
-        return ""
-    return read_text(path) if path else ""
+def _find_desktop_file(desktop_id):
+    """Same search DesktopAppInfo.new() does internally (XDG_DATA_HOME, then
+    each XDG_DATA_DIRS entry's applications/ dir, in order), used as a
+    fallback below -- app.get_filename() has also been observed raising
+    TypeError on this project's own CI, so the underlying file sometimes
+    has to be found independently of the app object entirely."""
+    home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    for base in (home, *dirs.split(":")):
+        if not base:
+            continue
+        candidate = Path(base) / "applications" / desktop_id
+        if candidate.is_file():
+            return candidate
+    return None
 
 
-def _is_hidden(app):
+def _is_hidden(app, desktop_id):
     """Hidden=true means "treat as uninstalled" per the desktop-entry spec.
     Every way tried to read it -- get_is_hidden(), get_boolean("Hidden"),
-    even the plain get_filename() the fallback below needs -- has raised
-    TypeError with a different arity on this project's own CI (PyGObject/
-    GioUnix.DesktopAppInfo), each only after fixing the last. That is a
-    binding reliability problem bigger than any one method (see also
-    _desktop_name(), hit by the same thing for a different key), not
-    something to keep chasing call signature by call signature: try each,
-    and if every one fails, fail open (assume visible) rather than erroring
-    the whole catalogue out over one cosmetic check.
+    even app.get_filename() -- has raised TypeError with a different arity
+    on this project's own CI (PyGObject/GioUnix.DesktopAppInfo), each only
+    after fixing the last. That is a binding reliability problem bigger
+    than any one method (see also _desktop_name(), hit by the same thing
+    for a different key), not something to keep chasing call signature by
+    call signature: try each, and if every one fails, fail open (assume
+    visible) rather than erroring the whole catalogue out over one
+    cosmetic check.
     """
     try:
         return bool(app.get_is_hidden())
@@ -617,32 +622,37 @@ def _is_hidden(app):
         return bool(app.get_boolean("Hidden"))
     except TypeError:
         pass
+    path = _find_desktop_file(desktop_id)
+    text = read_text(path) if path else ""
     # The desktop-entry spec's boolean type is lowercase-only ("true"/"false");
     # match GLib's own parsing exactly rather than being more lenient than it.
-    return bool(re.search(r"(?m)^Hidden=true\s*$", _desktop_file_text(app)))
+    return bool(re.search(r"(?m)^Hidden=true\s*$", text))
 
 
-def _desktop_name(app):
+def _desktop_name(app, desktop_id):
     """The desktop file's base, non-localized Name key. get_display_name()
     honours the session locale (e.g. Name[de]=... on a German system),
     which would leak non-English text into this hub's otherwise all-English
     detail line; get_string("Name") is the way to read the base key
     directly -- when that itself isn't usable (see _is_hidden), fall back
-    to the same raw-file read, matched against the exact, unsuffixed key."""
+    to the same file lookup, matched against the exact, unsuffixed key."""
     try:
         name = app.get_string("Name")
-        import sys; print(f"DEBUG _desktop_name: get_string returned {name!r}", file=sys.stderr)
         if name:
             return name
-    except TypeError as exc:
-        import sys; print(f"DEBUG _desktop_name: get_string raised {exc!r}", file=sys.stderr)
-    text = _desktop_file_text(app)
-    import sys; print(f"DEBUG _desktop_name: file text is {text!r}", file=sys.stderr)
+    except TypeError:
+        pass
+    path = _find_desktop_file(desktop_id)
+    text = read_text(path) if path else ""
     match = re.search(r"(?m)^Name=(.*)$", text)
     return match[1].strip() if match else ""
 
 
 def desktop_info(entry):
+    """Returns (app, desktop_id) for the first entry.target that resolves
+    and isn't hidden, or (None, None). The id travels with the app because
+    _desktop_name()'s fallback needs it and app.get_filename() can't be
+    trusted to recover it (see _find_desktop_file())."""
     for desktop_id in entry.target:
         try:
             app = DesktopAppInfo.new(desktop_id)
@@ -656,9 +666,9 @@ def desktop_info(entry):
         # panels, all on Hyprland). Only Hidden=true ("treat as uninstalled")
         # disqualifies a match; the constructor above already rejects entries
         # whose Exec binary cannot be found on PATH at all.
-        if app and not _is_hidden(app):
-            return app
-    return None
+        if app and not _is_hidden(app, desktop_id):
+            return app, desktop_id
+    return None, None
 
 
 def hyde_available(entry):
@@ -879,7 +889,7 @@ def create_application():
             return False
 
         def add_entry(self, entry):
-            app = desktop_info(entry) if entry.desktop else None
+            app, desktop_id = desktop_info(entry) if entry.desktop else (None, None)
             available = bool(app) if entry.desktop else hyde_available(entry)
             outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             button = Gtk.Button()
@@ -898,7 +908,7 @@ def create_application():
                 detail = f"Current: {current}" if current else "Not set -- Waybar falls back to your network location"
             else:
                 detail = (
-                    f"Opens {_desktop_name(app) or app.get_display_name()}" if app
+                    f"Opens {_desktop_name(app, desktop_id) or app.get_display_name()}" if app
                     else "Opens HyDE selector" if is_selector
                     else "Runs a HyDE action" if available
                     else "Required tool is not installed"
@@ -928,7 +938,7 @@ def create_application():
                 if entry.title == "Weather location":
                     self.open_weather_location()
                 elif entry.desktop:
-                    app = desktop_info(entry)
+                    app, _desktop_id = desktop_info(entry)
                     if not app:
                         raise ValueError("Required application is no longer available")
                     if not app.launch([], self.window.get_display().get_app_launch_context()):
