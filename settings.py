@@ -631,11 +631,14 @@ def _desktop_name(app):
     to the same raw-file read, matched against the exact, unsuffixed key."""
     try:
         name = app.get_string("Name")
+        import sys; print(f"DEBUG _desktop_name: get_string returned {name!r}", file=sys.stderr)
         if name:
             return name
-    except TypeError:
-        pass
-    match = re.search(r"(?m)^Name=(.*)$", _desktop_file_text(app))
+    except TypeError as exc:
+        import sys; print(f"DEBUG _desktop_name: get_string raised {exc!r}", file=sys.stderr)
+    text = _desktop_file_text(app)
+    import sys; print(f"DEBUG _desktop_name: file text is {text!r}", file=sys.stderr)
+    match = re.search(r"(?m)^Name=(.*)$", text)
     return match[1].strip() if match else ""
 
 
