@@ -585,16 +585,29 @@ def palette_provider(path):
     return provider
 
 
+def _desktop_file_text(app):
+    """The underlying .desktop file's raw text, or "" if it can't be read --
+    the fallback several GDesktopAppInfo convenience methods below fall back
+    to when the method itself turns out to be unusable (see _is_hidden and
+    _desktop_name)."""
+    try:
+        path = app.get_filename()
+    except TypeError:
+        return ""
+    return read_text(path) if path else ""
+
+
 def _is_hidden(app):
     """Hidden=true means "treat as uninstalled" per the desktop-entry spec.
     Every way tried to read it -- get_is_hidden(), get_boolean("Hidden"),
-    even the plain get_filename() this fell back to -- has raised TypeError
-    with a different arity on this project's own CI (PyGObject/
+    even the plain get_filename() the fallback below needs -- has raised
+    TypeError with a different arity on this project's own CI (PyGObject/
     GioUnix.DesktopAppInfo), each only after fixing the last. That is a
-    binding reliability problem bigger than any one method, not something
-    to keep chasing call signature by call signature: try each, and if
-    every one fails, fail open (assume visible) rather than erroring the
-    whole catalogue out over one cosmetic check.
+    binding reliability problem bigger than any one method (see also
+    _desktop_name(), hit by the same thing for a different key), not
+    something to keep chasing call signature by call signature: try each,
+    and if every one fails, fail open (assume visible) rather than erroring
+    the whole catalogue out over one cosmetic check.
     """
     try:
         return bool(app.get_is_hidden())
@@ -604,13 +617,26 @@ def _is_hidden(app):
         return bool(app.get_boolean("Hidden"))
     except TypeError:
         pass
-    try:
-        path = app.get_filename()
-    except TypeError:
-        return False
     # The desktop-entry spec's boolean type is lowercase-only ("true"/"false");
     # match GLib's own parsing exactly rather than being more lenient than it.
-    return bool(path) and bool(re.search(r"(?m)^Hidden=true\s*$", read_text(path)))
+    return bool(re.search(r"(?m)^Hidden=true\s*$", _desktop_file_text(app)))
+
+
+def _desktop_name(app):
+    """The desktop file's base, non-localized Name key. get_display_name()
+    honours the session locale (e.g. Name[de]=... on a German system),
+    which would leak non-English text into this hub's otherwise all-English
+    detail line; get_string("Name") is the way to read the base key
+    directly -- when that itself isn't usable (see _is_hidden), fall back
+    to the same raw-file read, matched against the exact, unsuffixed key."""
+    try:
+        name = app.get_string("Name")
+        if name:
+            return name
+    except TypeError:
+        pass
+    match = re.search(r"(?m)^Name=(.*)$", _desktop_file_text(app))
+    return match[1].strip() if match else ""
 
 
 def desktop_info(entry):
@@ -869,7 +895,7 @@ def create_application():
                 detail = f"Current: {current}" if current else "Not set -- Waybar falls back to your network location"
             else:
                 detail = (
-                    f"Opens {app.get_string('Name') or app.get_display_name()}" if app
+                    f"Opens {_desktop_name(app) or app.get_display_name()}" if app
                     else "Opens HyDE selector" if is_selector
                     else "Runs a HyDE action" if available
                     else "Required tool is not installed"

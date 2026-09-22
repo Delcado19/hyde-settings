@@ -141,6 +141,49 @@ class Logic(unittest.TestCase):
 
             self.assertFalse(s._is_hidden(FileReadAlsoBroken()))
 
+    def test_desktop_name_falls_back_across_broken_bindings(self):
+        # Same binding-reliability problem as _is_hidden(), for a different
+        # key: get_string("Name") also raised TypeError on this project's
+        # own CI, only after get_is_hidden()/get_boolean("Hidden") had
+        # already been worked around.
+        class GetStringWorks:
+            def get_string(self, key):
+                return "Right Name" if key == "Name" else ""
+
+        self.assertEqual(s._desktop_name(GetStringWorks()), "Right Name")
+
+        class GetStringReturnsEmpty:
+            def get_string(self, key):
+                return ""
+
+            def get_filename(self):
+                raise TypeError()
+
+        # missing input: no Name key anywhere -- empty, not an exception
+        self.assertEqual(s._desktop_name(GetStringReturnsEmpty()), "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test.desktop"
+
+            class GetStringBroken:
+                def get_string(self, key):
+                    raise TypeError("simulated binding incompatibility")
+
+                def get_filename(self):
+                    return str(path)
+
+            path.write_text("[Desktop Entry]\nName=Fallback Name\n")
+            self.assertEqual(s._desktop_name(GetStringBroken()), "Fallback Name")
+            # boundary: the localized key must not be matched as the base one
+            path.write_text("[Desktop Entry]\nName[de]=Deutscher Name\n")
+            self.assertEqual(s._desktop_name(GetStringBroken()), "")
+
+            class AlsoFileReadBroken(GetStringBroken):
+                def get_filename(self):
+                    raise TypeError()
+
+            self.assertEqual(s._desktop_name(AlsoFileReadBroken()), "")
+
     def test_parse_coordinates(self):
         for query, expected in (
             ("52.0302,8.5325", (52.0302, 8.5325)),
