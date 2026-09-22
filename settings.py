@@ -587,15 +587,30 @@ def palette_provider(path):
 
 def _is_hidden(app):
     """Hidden=true means "treat as uninstalled" per the desktop-entry spec.
-    GDesktopAppInfo's own convenience methods for this (get_is_hidden(),
-    get_boolean("Hidden")) have incompatible call signatures across
-    PyGObject/GioUnix.DesktopAppInfo versions -- both have been observed
-    raising TypeError, with different arities, on different CI runs. Read
-    the key from the file directly instead of trusting either wrapper."""
-    path = app.get_filename()
-    if not path:
+    Every way tried to read it -- get_is_hidden(), get_boolean("Hidden"),
+    even the plain get_filename() this fell back to -- has raised TypeError
+    with a different arity on this project's own CI (PyGObject/
+    GioUnix.DesktopAppInfo), each only after fixing the last. That is a
+    binding reliability problem bigger than any one method, not something
+    to keep chasing call signature by call signature: try each, and if
+    every one fails, fail open (assume visible) rather than erroring the
+    whole catalogue out over one cosmetic check.
+    """
+    try:
+        return bool(app.get_is_hidden())
+    except TypeError:
+        pass
+    try:
+        return bool(app.get_boolean("Hidden"))
+    except TypeError:
+        pass
+    try:
+        path = app.get_filename()
+    except TypeError:
         return False
-    return bool(re.search(r"(?im)^Hidden\s*=\s*true\s*$", read_text(path)))
+    # The desktop-entry spec's boolean type is lowercase-only ("true"/"false");
+    # match GLib's own parsing exactly rather than being more lenient than it.
+    return bool(path) and bool(re.search(r"(?m)^Hidden=true\s*$", read_text(path)))
 
 
 def desktop_info(entry):

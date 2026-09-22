@@ -82,6 +82,65 @@ class Logic(unittest.TestCase):
                 self.assertFalse(s.matches(display, query))
         self.assertTrue(s.matches(s.ENTRIES[0], "lautstärke"))
 
+    def test_is_hidden_falls_back_across_broken_bindings(self):
+        # The bug this guards: get_is_hidden(), get_boolean("Hidden") and
+        # get_filename() have each raised TypeError with a different arity
+        # on this project's own CI (a PyGObject/GioUnix.DesktopAppInfo
+        # binding quirk), one only surfacing after the last was fixed.
+        class AllBroken:
+            def get_is_hidden(self):
+                raise TypeError("simulated binding incompatibility")
+
+            def get_boolean(self, key):
+                raise TypeError("simulated binding incompatibility")
+
+            def get_filename(self):
+                raise TypeError("simulated binding incompatibility")
+
+        # missing input: every method broken -- fail open, not an exception
+        self.assertFalse(s._is_hidden(AllBroken()))
+
+        class OnlyIsHiddenWorks:
+            def get_is_hidden(self):
+                return True
+
+        self.assertTrue(s._is_hidden(OnlyIsHiddenWorks()))
+
+        class OnlyGetBooleanWorks:
+            def get_is_hidden(self):
+                raise TypeError()
+
+            def get_boolean(self, key):
+                return key == "Hidden"
+
+        self.assertTrue(s._is_hidden(OnlyGetBooleanWorks()))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test.desktop"
+
+            class OnlyFileReadWorks:
+                def get_is_hidden(self):
+                    raise TypeError()
+
+                def get_boolean(self, key):
+                    raise TypeError()
+
+                def get_filename(self):
+                    return str(path)
+
+            path.write_text("[Desktop Entry]\nHidden=true\n")
+            self.assertTrue(s._is_hidden(OnlyFileReadWorks()))
+            path.write_text("[Desktop Entry]\nHidden=false\n")
+            self.assertFalse(s._is_hidden(OnlyFileReadWorks()))
+            path.write_text("[Desktop Entry]\n")  # boundary: key absent entirely
+            self.assertFalse(s._is_hidden(OnlyFileReadWorks()))
+
+            class FileReadAlsoBroken(OnlyFileReadWorks):
+                def get_filename(self):
+                    raise TypeError()
+
+            self.assertFalse(s._is_hidden(FileReadAlsoBroken()))
+
     def test_parse_coordinates(self):
         for query, expected in (
             ("52.0302,8.5325", (52.0302, 8.5325)),
@@ -491,14 +550,12 @@ class GtkBehaviour(unittest.TestCase):
         self.assertEqual(resolved(True).get_display_name(), "Test Tool")
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=true\n')
         self.assertIsNone(resolved(False))
-        # Case-insensitive and explicit-false, since _is_hidden() reads the
-        # raw key instead of trusting a GDesktopAppInfo convenience method
-        # (get_is_hidden()/get_boolean("Hidden") have incompatible call
-        # signatures across PyGObject/GioUnix versions -- both have raised
-        # TypeError on real CI runs).
-        path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=TRUE\n')
-        self.assertIsNone(resolved(False))
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=false\n')
+        self.assertEqual(resolved(True).get_display_name(), "Test Tool")
+        # The desktop-entry spec's boolean type is lowercase-only; "TRUE" is
+        # not a valid value and GIO's own parser (like _is_hidden()'s file-
+        # read fallback) treats it as unset/false, not as hidden.
+        path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=TRUE\n')
         self.assertEqual(resolved(True).get_display_name(), "Test Tool")
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nTryExec=/does/not/exist\n')
         self.assertIsNone(s.desktop_info(entry))
