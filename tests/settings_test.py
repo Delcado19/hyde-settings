@@ -491,6 +491,15 @@ class GtkBehaviour(unittest.TestCase):
         self.assertEqual(resolved(True).get_display_name(), "Test Tool")
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=true\n')
         self.assertIsNone(resolved(False))
+        # Case-insensitive and explicit-false, since _is_hidden() reads the
+        # raw key instead of trusting a GDesktopAppInfo convenience method
+        # (get_is_hidden()/get_boolean("Hidden") have incompatible call
+        # signatures across PyGObject/GioUnix versions -- both have raised
+        # TypeError on real CI runs).
+        path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=TRUE\n')
+        self.assertIsNone(resolved(False))
+        path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nHidden=false\n')
+        self.assertEqual(resolved(True).get_display_name(), "Test Tool")
         path.write_text('[Desktop Entry]\nType=Application\nName=Test Tool\nExec=/bin/true\nTryExec=/does/not/exist\n')
         self.assertIsNone(s.desktop_info(entry))
         path.write_text('not a desktop entry')

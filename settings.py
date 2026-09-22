@@ -585,6 +585,19 @@ def palette_provider(path):
     return provider
 
 
+def _is_hidden(app):
+    """Hidden=true means "treat as uninstalled" per the desktop-entry spec.
+    GDesktopAppInfo's own convenience methods for this (get_is_hidden(),
+    get_boolean("Hidden")) have incompatible call signatures across
+    PyGObject/GioUnix.DesktopAppInfo versions -- both have been observed
+    raising TypeError, with different arities, on different CI runs. Read
+    the key from the file directly instead of trusting either wrapper."""
+    path = app.get_filename()
+    if not path:
+        return False
+    return bool(re.search(r"(?im)^Hidden\s*=\s*true\s*$", read_text(path)))
+
+
 def desktop_info(entry):
     for desktop_id in entry.target:
         try:
@@ -599,10 +612,7 @@ def desktop_info(entry):
         # panels, all on Hyprland). Only Hidden=true ("treat as uninstalled")
         # disqualifies a match; the constructor above already rejects entries
         # whose Exec binary cannot be found on PATH at all.
-        # get_boolean("Hidden") reads the same key get_is_hidden() wraps, but
-        # portably: CI's PyGObject/GioUnix binding requires an argument for
-        # get_is_hidden() and raises TypeError without one, uncaught here.
-        if app and not app.get_boolean("Hidden"):
+        if app and not _is_hidden(app):
             return app
     return None
 
